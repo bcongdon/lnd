@@ -100,13 +100,8 @@ func testSingleConfirmationNotification(miner *rpctest.Harness,
 		t.Fatalf("unable to generate single block: %v", err)
 	}
 
-	confSent := make(chan *chainntnfs.TxConfirmation)
-	go func() {
-		confSent <- <-confIntent.Confirmed
-	}()
-
 	select {
-	case confInfo := <-confSent:
+	case confInfo := <-confIntent.Confirmed:
 		// Finally, we'll verify that the tx index returned is the exact same
 		// as the tx index of the transaction within the block itself.
 		msgBlock, err := miner.Node.GetBlock(blockHash[0])
@@ -160,16 +155,11 @@ func testMultiConfirmationNotification(miner *rpctest.Harness,
 		t.Fatalf("unable to generate single block: %v", err)
 	}
 
-	confSent := make(chan *chainntnfs.TxConfirmation)
-	go func() {
-		confSent <- <-confIntent.Confirmed
-	}()
-
 	// TODO(roasbeef): reduce all timeouts after neutrino sync tightended
 	// up
 
 	select {
-	case <-confSent:
+	case <-confIntent.Confirmed:
 		break
 	case <-time.After(20 * time.Second):
 		t.Fatalf("confirmation notification never received")
@@ -229,13 +219,8 @@ func testBatchConfirmationNotification(miner *rpctest.Harness,
 			t.Fatalf("unable to generate single block: %v", err)
 		}
 
-		confSent := make(chan *chainntnfs.TxConfirmation)
-		go func() {
-			confSent <- <-confIntents[i].Confirmed
-		}()
-
 		select {
-		case conf := <-confSent:
+		case conf := <-confIntents[i].Confirmed:
 			// All of the notifications above were originally
 			// confirmed in the same block. The returned
 			// notification should list the initial confirmation
@@ -529,7 +514,7 @@ func testTxConfirmedBeforeNtfnRegistration(miner *rpctest.Harness,
 	// notification will never be sent.
 	blockHash, err := miner.Node.Generate(1)
 	if err != nil {
-		t.Fatalf("unable to generate two blocks: %v", err)
+		t.Fatalf("unable to generate block: %v", err)
 	}
 
 	_, currentHeight, err := miner.Node.GetBestBlock()
@@ -546,13 +531,8 @@ func testTxConfirmedBeforeNtfnRegistration(miner *rpctest.Harness,
 		t.Fatalf("unable to register ntfn: %v", err)
 	}
 
-	confSent := make(chan *chainntnfs.TxConfirmation)
-	go func() {
-		confSent <- <-confIntent.Confirmed
-	}()
-
 	select {
-	case confInfo := <-confSent:
+	case confInfo := <-confIntent.Confirmed:
 		// Finally, we'll verify that the tx index returned is the exact same
 		// as the tx index of the transaction within the block itself.
 		msgBlock, err := miner.Node.GetBlock(blockHash[0])
@@ -597,10 +577,14 @@ func testTxConfirmedBeforeNtfnRegistration(miner *rpctest.Harness,
 	// will generate the confirmations in chunks.
 	numConfs = 6
 
+	time.Sleep(time.Second * 2)
+
 	// First, generate 2 confirmations.
 	if _, err := miner.Node.Generate(2); err != nil {
 		t.Fatalf("unable to generate blocks: %v", err)
 	}
+
+	time.Sleep(time.Second * 2)
 
 	// Next, register for the notification *after* the transition has
 	// already been partially confirmed.
@@ -610,22 +594,121 @@ func testTxConfirmedBeforeNtfnRegistration(miner *rpctest.Harness,
 		t.Fatalf("unable to register ntfn: %v", err)
 	}
 
-	// With the notification registered, generate another 4 blocks, this
-	// should dispatch the notification.
-	if _, err := miner.Node.Generate(4); err != nil {
+	// We shouldn't receive a notification at this point, as the
+	// transaction hasn't yet been fully confirmed.
+	select {
+	case <-confIntent.Confirmed:
+		t.Fatalf("received confirmation notification but shouldn't " +
+			"have")
+	default:
+		// Expected case
+	}
+
+	// With the notification registered, generate another 3 blocks, this
+	// shouldn't yet dispatch the notification.
+	if _, err := miner.Node.Generate(3); err != nil {
 		t.Fatalf("unable to generate blocks: %v", err)
 	}
 
-	confSent = make(chan *chainntnfs.TxConfirmation)
-	go func() {
-		confSent <- <-confIntent.Confirmed
-	}()
+	select {
+	case <-confIntent.Confirmed:
+		t.Fatalf("received confirmation notification but shouldn't " +
+			"have")
+	default:
+		// Expected case
+	}
+
+	// Finally, we'll mine the final block which should dispatch the
+	// notification.
+	if _, err := miner.Node.Generate(1); err != nil {
+		t.Fatalf("unable to generate blocks: %v", err)
+	}
 
 	select {
-	case <-confSent:
+	case <-confIntent.Confirmed:
 		break
 	case <-time.After(30 * time.Second):
 		t.Fatalf("confirmation notification never received")
+	}
+}
+
+// Test the case of a notification consumer having forget or being delayed in
+// checking for a confirmation. This should not cause the notifier to stop
+// working
+func testLazyNtfnConsumer(miner *rpctest.Harness,
+	notifier chainntnfs.ChainNotifier, t *testing.T) {
+
+	// Create a transaction to be notified about. We'll register for
+	// notifications on this transaction but won't be prompt in checking them
+	txid, err := getTestTxId(miner)
+	if err != nil {
+		t.Fatalf("unable to create test tx: %v", err)
+	}
+
+	_, currentHeight, err := miner.Node.GetBestBlock()
+	if err != nil {
+		t.Fatalf("unable to get current height: %v", err)
+	}
+
+	numConfs := uint32(3)
+
+	// Add a block right before registering, this makes race conditions
+	// between the historical dispatcher and the normal dispatcher more obvious
+	if _, err := miner.Node.Generate(1); err != nil {
+		t.Fatalf("unable to generate blocks: %v", err)
+	}
+
+	firstConfIntent, err := notifier.RegisterConfirmationsNtfn(txid, numConfs,
+		uint32(currentHeight))
+	if err != nil {
+		t.Fatalf("unable to register ntfn: %v", err)
+	}
+
+	// Generate another 2 blocks, this should dispatch the confirm notification
+	if _, err := miner.Node.Generate(2); err != nil {
+		t.Fatalf("unable to generate blocks: %v", err)
+	}
+
+	// Now make another transaction, just because we haven't checked to see
+	// if the first transaction has confirmed doesn't mean that we shouldn't
+	// be able to see if this transaction confirms first
+	txid, err = getTestTxId(miner)
+	if err != nil {
+		t.Fatalf("unable to create test tx: %v", err)
+	}
+
+	_, currentHeight, err = miner.Node.GetBestBlock()
+	if err != nil {
+		t.Fatalf("unable to get current height: %v", err)
+	}
+
+	numConfs = 1
+
+	secondConfIntent, err := notifier.RegisterConfirmationsNtfn(txid, numConfs,
+		uint32(currentHeight))
+
+	if err != nil {
+		t.Fatalf("unable to register ntfn: %v", err)
+	}
+
+	if _, err := miner.Node.Generate(1); err != nil {
+		t.Fatalf("unable to generate blocks: %v", err)
+	}
+
+	select {
+	case <-secondConfIntent.Confirmed:
+		// Successfully receive the second notification
+		break
+	case <-time.After(30 * time.Second):
+		t.Fatalf("Second confirmation notification never received")
+	}
+
+	// Make sure the first tx confirmed successfully
+	select {
+	case <-firstConfIntent.Confirmed:
+		break
+	case <-time.After(30 * time.Second):
+		t.Fatalf("First confirmation notification never received")
 	}
 }
 
@@ -924,6 +1007,10 @@ var ntfnTests = []testCase{
 	{
 		name: "cancel epoch ntfn",
 		test: testCancelEpochNtfn,
+	},
+	{
+		name: "lazy ntfn consumer",
+		test: testLazyNtfnConsumer,
 	},
 }
 

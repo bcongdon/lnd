@@ -25,7 +25,7 @@ func (m *mockSigner) SignOutputRaw(tx *wire.MsgTx,
 	privKey := m.key
 
 	sig, err := txscript.RawTxInWitnessSignature(tx, signDesc.SigHashes,
-		signDesc.InputIndex, amt, witnessScript, txscript.SigHashAll,
+		signDesc.InputIndex, amt, witnessScript, signDesc.HashType,
 		privKey)
 	if err != nil {
 		return nil, err
@@ -38,7 +38,7 @@ func (m *mockSigner) ComputeInputScript(tx *wire.MsgTx,
 	signDesc *lnwallet.SignDescriptor) (*lnwallet.InputScript, error) {
 	witnessScript, err := txscript.WitnessSignature(tx, signDesc.SigHashes,
 		signDesc.InputIndex, signDesc.Output.Value,
-		signDesc.Output.PkScript, txscript.SigHashAll, m.key, true)
+		signDesc.Output.PkScript, signDesc.HashType, m.key, true)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +141,9 @@ func (m *mockWalletController) NewRawKey() (*btcec.PublicKey, error) {
 func (m *mockWalletController) FetchRootKey() (*btcec.PrivateKey, error) {
 	return m.rootKey, nil
 }
-func (*mockWalletController) SendOutputs(outputs []*wire.TxOut) (*chainhash.Hash, error) {
+func (*mockWalletController) SendOutputs(outputs []*wire.TxOut,
+	_ btcutil.Amount) (*chainhash.Hash, error) {
+
 	return nil, nil
 }
 
@@ -149,7 +151,9 @@ func (*mockWalletController) SendOutputs(outputs []*wire.TxOut) (*chainhash.Hash
 // need one unspent for the funding transaction.
 func (*mockWalletController) ListUnspentWitness(confirms int32) ([]*lnwallet.Utxo, error) {
 	utxo := &lnwallet.Utxo{
-		Value: btcutil.Amount(10 * btcutil.SatoshiPerBitcoin),
+		AddressType: lnwallet.WitnessPubKey,
+		Value:       btcutil.Amount(10 * btcutil.SatoshiPerBitcoin),
+		PkScript:    make([]byte, 22),
 		OutPoint: wire.OutPoint{
 			Hash:  chainhash.Hash{},
 			Index: 0,

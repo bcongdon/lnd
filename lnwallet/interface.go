@@ -20,8 +20,12 @@ var ErrNotMine = errors.New("the passed output doesn't belong to the wallet")
 type AddressType uint8
 
 const (
+	// UnknownAddressType represents an output with an unknown or non-standard
+	// script.
+	UnknownAddressType AddressType = iota
+
 	// WitnessPubKey represents a p2wkh address.
-	WitnessPubKey AddressType = iota
+	WitnessPubKey
 
 	// NestedWitnessPubKey represents a p2sh output which is itself a
 	// nested p2wkh output.
@@ -34,7 +38,11 @@ const (
 // Utxo is an unspent output denoted by its outpoint, and output value of the
 // original output.
 type Utxo struct {
-	Value btcutil.Amount
+	AddressType   AddressType
+	Value         btcutil.Amount
+	PkScript      []byte
+	RedeemScript  []byte
+	WitnessScript []byte
 	wire.OutPoint
 }
 
@@ -143,9 +151,11 @@ type WalletController interface {
 
 	// SendOutputs funds, signs, and broadcasts a Bitcoin transaction
 	// paying out to the specified outputs. In the case the wallet has
-	// insufficient funds, or the outputs are non-standard, an error
-	// should be returned.
-	SendOutputs(outputs []*wire.TxOut) (*chainhash.Hash, error)
+	// insufficient funds, or the outputs are non-standard, an error should
+	// be returned. This method also takes the target fee expressed in
+	// sat/byte that should be used when crafting the transaction.
+	SendOutputs(outputs []*wire.TxOut,
+		feeSatPerByte btcutil.Amount) (*chainhash.Hash, error)
 
 	// ListUnspentWitness returns all unspent outputs which are version 0
 	// witness programs. The 'confirms' parameter indicates the minimum
@@ -258,26 +268,6 @@ type MessageSigner interface {
 	// is unable to be found, then an error will be returned. The actual
 	// digest signed is the double SHA-256 of the passed message.
 	SignMessage(pubKey *btcec.PublicKey, msg []byte) (*btcec.Signature, error)
-}
-
-// FeeEstimator provides the ability to estimate on-chain transaction fees for
-// various combinations of transaction sizes and desired confirmation time
-// (measured by number of blocks).
-type FeeEstimator interface {
-	// EstimateFeePerByte takes in a target for the number of blocks until
-	// an initial confirmation and returns the estimated fee expressed in
-	// satoshis/byte.
-	EstimateFeePerByte(numBlocks uint32) uint64
-
-	// EstimateFeePerWeight takes in a target for the number of blocks until
-	// an initial confirmation and returns the estimated fee expressed in
-	// satoshis/weight.
-	EstimateFeePerWeight(numBlocks uint32) uint64
-
-	// EstimateConfirmation will return the number of blocks expected for a
-	// transaction to be confirmed given a fee rate in satoshis per
-	// byte.
-	EstimateConfirmation(satPerByte int64) uint32
 }
 
 // WalletDriver represents a "driver" for a particular concrete

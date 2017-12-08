@@ -1,5 +1,5 @@
-hash: 4ad2d57e3948c928a894a627266d5548a18f5105439c0cfe6212c3441cb2f7ff
-updated: 2017-09-19T16:15:53.745859629-07:00
+hash: 61308ab312ec324ca9377c488879ef88312ba6d8066a9d9ea4f31e027f193906
+updated: 2017-11-23T23:32:06.04472113-06:00
 imports:
 - name: github.com/aead/chacha20
   version: d31a916ded42d1640b9d89a26f8abd53cc96790c
@@ -40,7 +40,7 @@ imports:
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
 - name: github.com/davecgh/go-spew
-  version: a476722483882dd40b8111f0eb64e1d7f43f56e4
+  version: ecdeabc65495df2dec95d7c4a4c3e021903035e5
   subpackages:
   - spew
 - name: github.com/go-errors/errors
@@ -70,20 +70,24 @@ imports:
 - name: github.com/kkdai/bstream
   version: f391b8402d23024e7c0f624b31267a89998fca95
 - name: github.com/lightninglabs/neutrino
-  version: 13f87f69d8c75f7d27f568338b67ad4a5ffc5099
+  version: 36dd930b83e6db89495e74fa7516a9fbe5ecfd60
   subpackages:
   - filterdb
   - headerfs
 - name: github.com/lightningnetwork/lightning-onion
-  version: 1d52214c016402c9cb78d479895afb370597b488
+  version: 18bf6612a0653a21daf1a08b4a59e54670a524a1
 - name: github.com/ltcsuite/ltcd
   version: 5f654d5faab99ee2b3488fabba98e5f7a5257ee3
   subpackages:
   - chaincfg
   - chaincfg/chainhash
   - wire
+- name: github.com/miekg/dns
+  version: 946bd9fbed05568b0f3cd188353d8aa28f38b688
+  subpackages:
+  - internal/socket
 - name: github.com/roasbeef/btcd
-  version: 4b411f0e78f1faa96ae650d886170d018c1835bf
+  version: 300370be8e0a44dedc4eea6319c56c1df7014325
   subpackages:
   - addrmgr
   - blockchain
@@ -101,7 +105,7 @@ imports:
 - name: github.com/roasbeef/btcrpcclient
   version: d0f4db8b4dad0ca3d569b804f21247c3dd96acbb
 - name: github.com/roasbeef/btcutil
-  version: 1584022350b4400b511beab6a013f0189adeef40
+  version: c3ff179366044979fb9856c2feb79bd4c2184c7a
   subpackages:
   - base58
   - bech32
@@ -112,7 +116,7 @@ imports:
   - hdkeychain
   - txsort
 - name: github.com/roasbeef/btcwallet
-  version: 211e002c9e424984c24e7524ae9bee01f6ef9b5c
+  version: 3037a033935cca719ba3c472870e7d080443a82f
   subpackages:
   - chain
   - internal/helpers
@@ -136,7 +140,7 @@ imports:
 - name: github.com/urfave/cli
   version: cfb38830724cc34fedffe9a2a29fb54fa9169cd1
 - name: golang.org/x/crypto
-  version: 81e90905daefcd6fd217b62423c0908922eadb30
+  version: 9419663f5a44be8b34ca85f08abc5fe1be11f8a3
   subpackages:
   - chacha20poly1305
   - chacha20poly1305/internal/chacha20
@@ -150,6 +154,7 @@ imports:
   - salsa20
   - salsa20/salsa
   - scrypt
+  - ssh/terminal
 - name: golang.org/x/net
   version: 66aacef3dd8a676686c7ae3716979581e8b03c47
   subpackages:
@@ -164,8 +169,9 @@ imports:
   version: ab9e364efd8b52800ff7ee48a9ffba4e0ed78dfb
   subpackages:
   - unix
+  - windows
 - name: golang.org/x/text
-  version: 79ab41e967c76b94c55d37134c51fc306609cffc
+  version: 18c65dde6afd36dbc39197ca72008895b8dfbfb6
   subpackages:
   - secure/bidirule
   - transform

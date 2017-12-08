@@ -241,7 +241,9 @@ alice$ lncli walletbalance
 # channel:
 bob$ lncli walletbalance
 {
-    "balance": 0.0001
+    "total_balance": "0.0001",
+    "confirmed_balance": "0.0001",
+    "unconfirmed_balance": "0"
 }
 ```
 
@@ -266,7 +268,7 @@ bitcoins. The schema will be following:
                        + --------------- +        
         
         
- (1) You may connect an additinal node "Bob" and make the multihope 
+ (1) You may connect an additinal node "Bob" and make the multihop
  payment Alice->Faucet->Bob
   
  (2) "Faucet", "Alice" and "Bob" are the lightning network daemons which 
@@ -278,7 +280,7 @@ bitcoins. The schema will be following:
  to "Faucet" than already created "btcd" node would be sufficient.
 ```
 
-First of all you need to run `btcd` node in `testnet` and wait it to be 
+First of all you need to run `btcd` node in `testnet` and wait for it to be 
 synced with test network (`May the Force and Patience be with you`).
 ```bash 
 # Init bitcoin network env variable:

@@ -1,4 +1,4 @@
-package invoice
+package zpay32
 
 import (
 	"bytes"
@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/lightningnetwork/lnd/routing"
 	"github.com/roasbeef/btcd/btcec"
 	"github.com/roasbeef/btcd/chaincfg"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
@@ -60,12 +61,14 @@ const (
 
 	// fieldTypeR contains extra routing information.
 	fieldTypeR = 3
+
+	// fieldTypeC contains an optional requested final CLTV delta.
+	fieldTypeC = 24
 )
 
 // MessageSigner is passed to the Encode method to provide a signature
 // corresponding to the node's pubkey.
 type MessageSigner struct {
-
 	// SignCompact signs the passed hash with the node's privkey. The
 	// returned signature should be 65 bytes, where the last 64 are the
 	// compact signature, and the first one is a header byte. This is the
@@ -100,6 +103,18 @@ type Invoice struct {
 	// and the pubkey will be extracted from the signature during decoding.
 	Destination *btcec.PublicKey
 
+	// minFinalCLTVExpiry is the value that the creator of the invoice
+	// expects to be used for the
+	//
+	// NOTE: This value is optional, and should be set to nil if the
+	// invoice creator doesn't have a strong requirement on the CLTV expiry
+	// of the final HTLC extended to it.
+	//
+	// This field is un-exported and can only be read by the
+	// MinFinalCLTVExpiry() method. By forcing callers to read via this
+	// method, we can easily enforce the default if not specified.
+	minFinalCLTVExpiry *uint64
+
 	// Description is a short description of the purpose of this invoice.
 	// Optional. Non-nil iff DescriptionHash is nil.
 	Description *string
@@ -109,9 +124,13 @@ type Invoice struct {
 	// Optional. Non-nil iff Description is nil.
 	DescriptionHash *[32]byte
 
-	// Expiry specifies the timespan this invoice will be valid.
+	// expiry specifies the timespan this invoice will be valid.
 	// Optional. If not set, a default expiry of 60 min will be implied.
-	Expiry *time.Time
+	//
+	// This field is unexported and can be read by the Expiry() method. This
+	// method makes sure the default expiry time is returned in case the
+	// field is not set.
+	expiry *time.Duration
 
 	// FallbackAddr is an on-chain address that can be used for payment in
 	// case the Lightning payment fails.
@@ -158,16 +177,27 @@ func Destination(destination *btcec.PublicKey) func(*Invoice) {
 
 // Description is a functional option that allows callers of NewInvoice to set
 // the payment description of the created Invoice.
-// Note: Must be used if and only if DescriptionHash is not used.
+//
+// NOTE: Must be used if and only if DescriptionHash is not used.
 func Description(description string) func(*Invoice) {
 	return func(i *Invoice) {
 		i.Description = &description
 	}
 }
 
+// CLTVExpiry is an optional value which allows the receiver of the payment to
+// specify the delta between the current height and the HTLC extended to the
+// receiver.
+func CLTVExpiry(delta uint64) func(*Invoice) {
+	return func(i *Invoice) {
+		i.minFinalCLTVExpiry = &delta
+	}
+}
+
 // DescriptionHash is a functional option that allows callers of NewInvoice to
 // set the payment description hash of the created Invoice.
-// Note: Must be used if and only if Description is not used.
+//
+// NOTE: Must be used if and only if Description is not used.
 func DescriptionHash(descriptionHash [32]byte) func(*Invoice) {
 	return func(i *Invoice) {
 		i.DescriptionHash = &descriptionHash
@@ -177,9 +207,9 @@ func DescriptionHash(descriptionHash [32]byte) func(*Invoice) {
 // Expiry is a functional option that allows callers of NewInvoice to set the
 // expiry of the created Invoice. If not set, a default expiry of 60 min will
 // be implied.
-func Expiry(expiry time.Time) func(*Invoice) {
+func Expiry(expiry time.Duration) func(*Invoice) {
 	return func(i *Invoice) {
-		i.Expiry = &expiry
+		i.expiry = &expiry
 	}
 }
 
@@ -203,7 +233,8 @@ func RoutingInfo(routingInfo []ExtraRoutingInfo) func(*Invoice) {
 
 // NewInvoice creates a new Invoice object. The last parameter is a set of
 // variadic argumements for setting optional fields of the invoice.
-// Note: Either Description  or DescriptionHash must be provided for the Invoice
+//
+// NOTE: Either Description  or DescriptionHash must be provided for the Invoice
 // to be considered valid.
 func NewInvoice(net *chaincfg.Params, paymentHash [32]byte,
 	timestamp time.Time, options ...func(*Invoice)) (*Invoice, error) {
@@ -444,6 +475,28 @@ func (invoice *Invoice) Encode(signer MessageSigner) (string, error) {
 	return b32, nil
 }
 
+// Expiry returns the expiry time for this invoice. If expiry time is not set
+// explicitly, the default 3600 second expiry will be returned.
+func (invoice *Invoice) Expiry() time.Duration {
+	if invoice.expiry != nil {
+		return *invoice.expiry
+	}
+
+	// If no expiry is set for this invoice, default is 3600 seconds.
+	return 3600 * time.Second
+}
+
+// MinFinalCLTVExpiry returns the minimum final CLTV expiry delta as specified
+// by the creator of the invoice. This value specifies the delta between the
+// current height and the expiry height of the HTLC extended in the last hop.
+func (invoice *Invoice) MinFinalCLTVExpiry() uint64 {
+	if invoice.minFinalCLTVExpiry != nil {
+		return *invoice.minFinalCLTVExpiry
+	}
+
+	return routing.DefaultFinalCLTVDelta
+}
+
 // validateInvoice does a sanity check of the provided Invoice, making sure it
 // has all the necessary fields set for it to be considered valid by BOLT-0011.
 func validateInvoice(invoice *Invoice) error {
@@ -624,7 +677,7 @@ func parseTaggedFields(invoice *Invoice, fields []byte, net *chaincfg.Params) er
 			copy(dHash[:], hash[:])
 			invoice.DescriptionHash = &dHash
 		case fieldTypeX:
-			if invoice.Expiry != nil {
+			if invoice.expiry != nil {
 				// We skip the field if we have already seen a
 				// supported one.
 				continue
@@ -634,8 +687,20 @@ func parseTaggedFields(invoice *Invoice, fields []byte, net *chaincfg.Params) er
 			if err != nil {
 				return err
 			}
-			unix := time.Unix(int64(exp), 0)
-			invoice.Expiry = &unix
+			dur := time.Duration(exp) * time.Second
+			invoice.expiry = &dur
+		case fieldTypeC:
+			if invoice.minFinalCLTVExpiry != nil {
+				// We skip the field if we have already seen a
+				// supported one.
+				continue
+			}
+
+			expiry, err := base32ToUint64(base32Data)
+			if err != nil {
+				return err
+			}
+			invoice.minFinalCLTVExpiry = &expiry
 		case fieldTypeF:
 			if invoice.FallbackAddr != nil {
 				// We skip the field if we have already seen a
@@ -660,7 +725,7 @@ func parseTaggedFields(invoice *Invoice, fields []byte, net *chaincfg.Params) er
 					addr, err = btcutil.NewAddressWitnessScriptHash(
 						witness, net)
 				default:
-					return fmt.Errorf("unknow witness "+
+					return fmt.Errorf("unknown witness "+
 						"program length: %d", len(witness))
 				}
 				if err != nil {
@@ -783,9 +848,17 @@ func writeTaggedFields(bufferBase32 *bytes.Buffer, invoice *Invoice) error {
 		}
 	}
 
-	if invoice.Expiry != nil {
-		unix := invoice.Expiry.Unix()
-		expiry := uint64ToBase32(uint64(unix))
+	if invoice.minFinalCLTVExpiry != nil {
+		finalDelta := uint64ToBase32(uint64(*invoice.minFinalCLTVExpiry))
+		err := writeTaggedField(bufferBase32, fieldTypeC, finalDelta)
+		if err != nil {
+			return err
+		}
+	}
+
+	if invoice.expiry != nil {
+		seconds := invoice.expiry.Seconds()
+		expiry := uint64ToBase32(uint64(seconds))
 		err := writeTaggedField(bufferBase32, fieldTypeX, expiry)
 		if err != nil {
 			return err

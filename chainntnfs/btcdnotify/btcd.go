@@ -72,13 +72,8 @@ type BtcdNotifier struct {
 
 	disconnectedBlockHashes chan *blockNtfn
 
-	chainUpdates      []*chainUpdate
-	chainUpdateSignal chan struct{}
-	chainUpdateMtx    sync.Mutex
-
-	txUpdates      []*txUpdate
-	txUpdateSignal chan struct{}
-	txUpdateMtx    sync.Mutex
+	chainUpdates *chainntnfs.ConcurrentQueue
+	txUpdates    *chainntnfs.ConcurrentQueue
 
 	wg   sync.WaitGroup
 	quit chan struct{}
@@ -104,8 +99,8 @@ func New(config *rpcclient.ConnConfig) (*BtcdNotifier, error) {
 
 		disconnectedBlockHashes: make(chan *blockNtfn, 20),
 
-		chainUpdateSignal: make(chan struct{}),
-		txUpdateSignal:    make(chan struct{}),
+		chainUpdates: chainntnfs.NewConcurrentQueue(10),
+		txUpdates:    chainntnfs.NewConcurrentQueue(10),
 
 		quit: make(chan struct{}),
 	}
@@ -151,6 +146,9 @@ func (b *BtcdNotifier) Start() error {
 		return err
 	}
 
+	b.chainUpdates.Start()
+	b.txUpdates.Start()
+
 	b.wg.Add(1)
 	go b.notificationDispatcher(currentHeight)
 
@@ -170,6 +168,9 @@ func (b *BtcdNotifier) Stop() error {
 
 	close(b.quit)
 	b.wg.Wait()
+
+	b.chainUpdates.Stop()
+	b.txUpdates.Stop()
 
 	// Notify all pending clients of our shutdown by closing the related
 	// notification channels.
@@ -204,16 +205,7 @@ type blockNtfn struct {
 func (b *BtcdNotifier) onBlockConnected(hash *chainhash.Hash, height int32, t time.Time) {
 	// Append this new chain update to the end of the queue of new chain
 	// updates.
-	b.chainUpdateMtx.Lock()
-	b.chainUpdates = append(b.chainUpdates, &chainUpdate{hash, height})
-	b.chainUpdateMtx.Unlock()
-
-	// Launch a goroutine to signal the notification dispatcher that a new
-	// block update is available. We do this in a new goroutine in order to
-	// avoid blocking the main loop of the rpc client.
-	go func() {
-		b.chainUpdateSignal <- struct{}{}
-	}()
+	b.chainUpdates.ChanIn() <- &chainUpdate{hash, height}
 }
 
 // onBlockDisconnected implements on OnBlockDisconnected callback for rpcclient.
@@ -224,16 +216,7 @@ func (b *BtcdNotifier) onBlockDisconnected(hash *chainhash.Hash, height int32, t
 func (b *BtcdNotifier) onRedeemingTx(tx *btcutil.Tx, details *btcjson.BlockDetails) {
 	// Append this new transaction update to the end of the queue of new
 	// chain updates.
-	b.txUpdateMtx.Lock()
-	b.txUpdates = append(b.txUpdates, &txUpdate{tx, details})
-	b.txUpdateMtx.Unlock()
-
-	// Launch a goroutine to signal the notification dispatcher that a new
-	// transaction update is available. We do this in a new goroutine in
-	// order to avoid blocking the main loop of the rpc client.
-	go func() {
-		b.txUpdateSignal <- struct{}{}
-	}()
+	b.txUpdates.ChanIn() <- &txUpdate{tx, details}
 }
 
 // notificationDispatcher is the primary goroutine which handles client
@@ -295,7 +278,7 @@ out:
 				// If the notification can be partially or
 				// fully dispatched, then we can skip the first
 				// phase for ntfns.
-				if b.attemptHistoricalDispatch(msg, currentHeight) {
+				if b.attemptHistoricalDispatch(msg) {
 					continue
 				}
 
@@ -314,15 +297,8 @@ out:
 			chainntnfs.Log.Warnf("Block disconnected from main "+
 				"chain: %v", staleBlockHash)
 
-		case <-b.chainUpdateSignal:
-			// A new update is available, so pop the new chain
-			// update from the front of the update queue.
-			b.chainUpdateMtx.Lock()
-			update := b.chainUpdates[0]
-			b.chainUpdates[0] = nil // Set to nil to prevent GC leak.
-			b.chainUpdates = b.chainUpdates[1:]
-			b.chainUpdateMtx.Unlock()
-
+		case item := <-b.chainUpdates.ChanOut():
+			update := item.(*chainUpdate)
 			currentHeight = update.blockHeight
 
 			newBlock, err := b.chainConn.GetBlock(update.blockHash)
@@ -355,15 +331,8 @@ out:
 			// which may have been triggered by this new block.
 			b.notifyConfs(newHeight)
 
-		case <-b.txUpdateSignal:
-			// A new update is available, so pop the new chain
-			// update from the front of the update queue.
-			b.txUpdateMtx.Lock()
-			newSpend := b.txUpdates[0]
-			b.txUpdates[0] = nil // Set to nil to prevent GC leak.
-			b.txUpdates = b.txUpdates[1:]
-			b.txUpdateMtx.Unlock()
-
+		case item := <-b.txUpdates.ChanOut():
+			newSpend := item.(*txUpdate)
 			spendingTx := newSpend.tx
 
 			// First, check if this transaction spends an output
@@ -418,8 +387,10 @@ out:
 // attemptHistoricalDispatch tries to use historical information to decide if a
 // notification ca be dispatched immediately, or is partially confirmed so it
 // can skip straight to the confirmations heap.
-func (b *BtcdNotifier) attemptHistoricalDispatch(msg *confirmationsNotification,
-	currentHeight int32) bool {
+//
+// Returns true if the transaction was either partially or completely confirmed
+func (b *BtcdNotifier) attemptHistoricalDispatch(
+	msg *confirmationsNotification) bool {
 
 	chainntnfs.Log.Infof("Attempting to trigger dispatch for %v from "+
 		"historical chain", msg.txid)
@@ -474,14 +445,16 @@ func (b *BtcdNotifier) attemptHistoricalDispatch(msg *confirmationsNotification,
 	// dispatch it immediately after obtaining for information w.r.t
 	// exactly *when* if got all its confirmations.
 	if uint32(tx.Confirmations) >= msg.numConfirmations {
+		chainntnfs.Log.Infof("Dispatching %v conf notification",
+			msg.numConfirmations)
 		msg.finConf <- confDetails
 		return true
 	}
 
 	// Otherwise, the transaction has only been *partially* confirmed, so
 	// we need to insert it into the confirmation heap.
-	confsLeft := msg.numConfirmations - uint32(tx.Confirmations)
-	confHeight := uint32(currentHeight) + confsLeft
+	// Find the block height at which this transaction will be confirmed
+	confHeight := uint32(block.Height) + msg.numConfirmations - 1
 	heapEntry := &confEntry{
 		msg,
 		confDetails,
@@ -489,7 +462,7 @@ func (b *BtcdNotifier) attemptHistoricalDispatch(msg *confirmationsNotification,
 	}
 	heap.Push(b.confHeap, heapEntry)
 
-	return false
+	return true
 }
 
 // notifyBlockEpochs notifies all registered block epoch clients of the newly
@@ -542,8 +515,8 @@ func (b *BtcdNotifier) notifyConfs(newBlockHeight int32) {
 	// is eligible until there are no more eligible entries.
 	nextConf := heap.Pop(b.confHeap).(*confEntry)
 	for nextConf.triggerHeight <= uint32(newBlockHeight) {
-		// TODO(roasbeef): shake out possible of by one in height calc
-		// for historical dispatches
+		chainntnfs.Log.Infof("Dispatching %v conf notification, "+
+			"height=%v", nextConf.numConfirmations, newBlockHeight)
 		nextConf.finConf <- nextConf.initialConfDetails
 
 		if b.confHeap.Len() == 0 {

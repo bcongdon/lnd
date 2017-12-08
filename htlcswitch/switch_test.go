@@ -40,11 +40,7 @@ func TestSwitchForward(t *testing.T) {
 	aliceChannelLink := newMockChannelLink(chanID1, aliceChanID, alicePeer)
 	bobChannelLink := newMockChannelLink(chanID2, bobChanID, bobPeer)
 
-	s := New(Config{
-		UpdateTopology: func(msg *lnwire.ChannelUpdate) error {
-			return nil
-		},
-	})
+	s := New(Config{})
 	s.Start()
 	if err := s.AddLink(aliceChannelLink); err != nil {
 		t.Fatalf("unable to add alice link: %v", err)
@@ -75,7 +71,7 @@ func TestSwitchForward(t *testing.T) {
 	case <-bobChannelLink.packets:
 		break
 	case <-time.After(time.Second):
-		t.Fatal("request was not propogated to destination")
+		t.Fatal("request was not propagated to destination")
 	}
 
 	if s.circuits.pending() != 1 {
@@ -122,11 +118,7 @@ func TestSwitchCancel(t *testing.T) {
 	aliceChannelLink := newMockChannelLink(chanID1, aliceChanID, alicePeer)
 	bobChannelLink := newMockChannelLink(chanID2, bobChanID, bobPeer)
 
-	s := New(Config{
-		UpdateTopology: func(msg *lnwire.ChannelUpdate) error {
-			return nil
-		},
-	})
+	s := New(Config{})
 	s.Start()
 	if err := s.AddLink(aliceChannelLink); err != nil {
 		t.Fatalf("unable to add alice link: %v", err)
@@ -157,7 +149,7 @@ func TestSwitchCancel(t *testing.T) {
 	case <-bobChannelLink.packets:
 		break
 	case <-time.After(time.Second):
-		t.Fatal("request was not propogated to destination")
+		t.Fatal("request was not propagated to destination")
 	}
 
 	if s.circuits.pending() != 1 {
@@ -202,11 +194,7 @@ func TestSwitchAddSamePayment(t *testing.T) {
 	aliceChannelLink := newMockChannelLink(chanID1, aliceChanID, alicePeer)
 	bobChannelLink := newMockChannelLink(chanID2, bobChanID, bobPeer)
 
-	s := New(Config{
-		UpdateTopology: func(msg *lnwire.ChannelUpdate) error {
-			return nil
-		},
-	})
+	s := New(Config{})
 	s.Start()
 	if err := s.AddLink(aliceChannelLink); err != nil {
 		t.Fatalf("unable to add alice link: %v", err)
@@ -237,7 +225,7 @@ func TestSwitchAddSamePayment(t *testing.T) {
 	case <-bobChannelLink.packets:
 		break
 	case <-time.After(time.Second):
-		t.Fatal("request was not propogated to destination")
+		t.Fatal("request was not propagated to destination")
 	}
 
 	if s.circuits.pending() != 1 {
@@ -270,7 +258,7 @@ func TestSwitchAddSamePayment(t *testing.T) {
 	case <-aliceChannelLink.packets:
 		break
 	case <-time.After(time.Second):
-		t.Fatal("request was not propogated to channelPoint")
+		t.Fatal("request was not propagated to channelPoint")
 	}
 
 	if s.circuits.pending() != 1 {
@@ -286,7 +274,7 @@ func TestSwitchAddSamePayment(t *testing.T) {
 	case <-aliceChannelLink.packets:
 		break
 	case <-time.After(time.Second):
-		t.Fatal("request was not propogated to channelPoint")
+		t.Fatal("request was not propagated to channelPoint")
 	}
 
 	if s.circuits.pending() != 0 {
@@ -302,11 +290,7 @@ func TestSwitchSendPayment(t *testing.T) {
 	alicePeer := newMockServer(t, "alice")
 	aliceChannelLink := newMockChannelLink(chanID1, aliceChanID, alicePeer)
 
-	s := New(Config{
-		UpdateTopology: func(msg *lnwire.ChannelUpdate) error {
-			return nil
-		},
-	})
+	s := New(Config{})
 	s.Start()
 	if err := s.AddLink(aliceChannelLink); err != nil {
 		t.Fatalf("unable to add link: %v", err)
@@ -343,7 +327,7 @@ func TestSwitchSendPayment(t *testing.T) {
 	case err := <-errChan:
 		t.Fatalf("unable to send payment: %v", err)
 	case <-time.After(time.Second):
-		t.Fatal("request was not propogated to destination")
+		t.Fatal("request was not propagated to destination")
 	}
 
 	select {
@@ -352,7 +336,7 @@ func TestSwitchSendPayment(t *testing.T) {
 	case err := <-errChan:
 		t.Fatalf("unable to send payment: %v", err)
 	case <-time.After(time.Second):
-		t.Fatal("request was not propogated to destination")
+		t.Fatal("request was not propagated to destination")
 	}
 
 	if s.numPendingPayments() != 2 {
@@ -368,7 +352,7 @@ func TestSwitchSendPayment(t *testing.T) {
 	// back. This request should be forwarded back to alice channel link.
 	obfuscator := newMockObfuscator()
 	failure := lnwire.FailIncorrectPaymentAmount{}
-	reason, err := obfuscator.InitialObfuscate(failure)
+	reason, err := obfuscator.EncryptFirstHop(failure)
 	if err != nil {
 		t.Fatalf("unable obfuscate failure: %v", err)
 	}

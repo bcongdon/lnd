@@ -61,6 +61,10 @@ var (
 	// seed nodes to log files.
 	logOutput = flag.Bool("logoutput", false,
 		"log output from node n to file outputn.log")
+
+	// trickleDelay is the amount of time in milliseconds between each
+	// release of announcements by AuthenticatedGossiper to the network.
+	trickleDelay = 50
 )
 
 // generateListeningPorts returns two strings representing ports to listen on
@@ -130,6 +134,8 @@ func newLightningNode(btcrpcConfig *rpcclient.ConnConfig, lndArgs []string) (*li
 	}
 
 	nodeNum := numActiveNodes
+	numActiveNodes++
+
 	cfg.DataDir, err = ioutil.TempDir("", "lndtest-data")
 	if err != nil {
 		return nil, err
@@ -145,10 +151,9 @@ func newLightningNode(btcrpcConfig *rpcclient.ConnConfig, lndArgs []string) (*li
 
 	cfg.PeerPort, cfg.RPCPort = generateListeningPorts()
 
-	numActiveNodes++
-
 	lndArgs = append(lndArgs, "--externalip=127.0.0.1:"+
 		strconv.Itoa(cfg.PeerPort))
+	lndArgs = append(lndArgs, "--noencryptwallet")
 
 	return &lightningNode{
 		cfg:               cfg,
@@ -172,6 +177,8 @@ func (l *lightningNode) genArgs() []string {
 	args = append(args, "--bitcoin.active")
 	args = append(args, "--bitcoin.simnet")
 	args = append(args, "--nobootstrap")
+	args = append(args, "--debuglevel=debug")
+	args = append(args, "--defaultchanconfs=1")
 	args = append(args, fmt.Sprintf("--bitcoin.rpchost=%v", l.cfg.Bitcoin.RPCHost))
 	args = append(args, fmt.Sprintf("--bitcoin.rpcuser=%v", l.cfg.Bitcoin.RPCUser))
 	args = append(args, fmt.Sprintf("--bitcoin.rpcpass=%v", l.cfg.Bitcoin.RPCPass))
@@ -186,6 +193,7 @@ func (l *lightningNode) genArgs() []string {
 	args = append(args, fmt.Sprintf("--adminmacaroonpath=%v", l.cfg.AdminMacPath))
 	args = append(args, fmt.Sprintf("--readonlymacaroonpath=%v", l.cfg.ReadMacPath))
 	args = append(args, fmt.Sprintf("--alias=%v", l.cfg.Alias))
+	args = append(args, fmt.Sprintf("--trickledelay=%v", trickleDelay))
 
 	if l.extraArgs != nil {
 		args = append(args, l.extraArgs...)
@@ -197,7 +205,7 @@ func (l *lightningNode) genArgs() []string {
 // Start launches a new process running lnd. Additionally, the PID of the
 // launched process is saved in order to possibly kill the process forcibly
 // later.
-func (l *lightningNode) Start(lndError chan error) error {
+func (l *lightningNode) Start(lndError chan<- error) error {
 	args := l.genArgs()
 
 	l.cmd = exec.Command("lnd", args...)
@@ -234,64 +242,27 @@ func (l *lightningNode) Start(lndError chan error) error {
 	// process errors to the goroutine running the tests.
 	go func() {
 		err := l.cmd.Wait()
+		if err != nil {
+			lndError <- errors.Errorf("%v\n%v\n", err, errb.String())
+		}
 
 		// Signal any onlookers that this process has exited.
 		close(l.processExit)
-
-		if err != nil {
-			lndError <- errors.New(errb.String())
-		}
 	}()
 
-	pid, err := os.Create(filepath.Join(l.cfg.DataDir,
-		fmt.Sprintf("%v.pid", l.nodeID)))
-	if err != nil {
-		return err
-	}
-	l.pidFile = pid.Name()
-	if _, err = fmt.Fprintf(pid, "%v\n", l.cmd.Process.Pid); err != nil {
-		return err
-	}
-	if err := pid.Close(); err != nil {
+	// Write process ID to a file.
+	if err := l.writePidFile(); err != nil {
+		l.cmd.Process.Kill()
 		return err
 	}
 
-	// Wait until TLS certificate and admin macaroon are created before
-	// using them, up to 20 sec.
-	tlsTimeout := time.After(30 * time.Second)
-	for !fileExists(l.cfg.TLSCertPath) || !fileExists(l.cfg.AdminMacPath) {
-		time.Sleep(100 * time.Millisecond)
-		select {
-		case <-tlsTimeout:
-			panic(fmt.Errorf("timeout waiting for TLS cert file " +
-				"and admin macaroon file to be created after " +
-				"20 seconds"))
-		default:
-		}
-	}
-	tlsCreds, err := credentials.NewClientTLSFromFile(l.cfg.TLSCertPath, "")
+	// Since Stop uses the LightningClient to stop the node, if we fail to get a
+	// connected client, we have to kill the process.
+	conn, err := l.connectRPC()
 	if err != nil {
+		l.cmd.Process.Kill()
 		return err
 	}
-	macBytes, err := ioutil.ReadFile(l.cfg.AdminMacPath)
-	if err != nil {
-		return err
-	}
-	mac := &macaroon.Macaroon{}
-	if err = mac.UnmarshalBinary(macBytes); err != nil {
-		return err
-	}
-	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(tlsCreds),
-		grpc.WithPerRPCCredentials(macaroons.NewMacaroonCredential(mac)),
-		grpc.WithBlock(),
-		grpc.WithTimeout(time.Second * 20),
-	}
-	conn, err := grpc.Dial(l.rpcAddr, opts...)
-	if err != nil {
-		return err
-	}
-
 	l.LightningClient = lnrpc.NewLightningClient(conn)
 
 	// Obtain the lnid of this node for quick identification purposes.
@@ -317,6 +288,62 @@ func (l *lightningNode) Start(lndError chan error) error {
 	return nil
 }
 
+// writePidFile writes the process ID of the running lnd process to a .pid file.
+func (l *lightningNode) writePidFile() error {
+	filePath := filepath.Join(l.cfg.DataDir, fmt.Sprintf("%v.pid", l.nodeID))
+
+	pid, err := os.Create(filePath)
+	if err != nil {
+		return err
+	}
+	defer pid.Close()
+
+	_, err = fmt.Fprintf(pid, "%v\n", l.cmd.Process.Pid)
+	if err != nil {
+		return err
+	}
+
+	l.pidFile = filePath
+	return nil
+}
+
+// connectRPC uses the TLS certificate and admin macaroon files written by the
+// lnd node to create a gRPC client connection.
+func (l *lightningNode) connectRPC() (*grpc.ClientConn, error) {
+	// Wait until TLS certificate and admin macaroon are created before
+	// using them, up to 20 sec.
+	tlsTimeout := time.After(30 * time.Second)
+	for !fileExists(l.cfg.TLSCertPath) || !fileExists(l.cfg.AdminMacPath) {
+		select {
+		case <-tlsTimeout:
+			return nil, fmt.Errorf("timeout waiting for TLS cert file " +
+				"and admin macaroon file to be created after " +
+				"20 seconds")
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	tlsCreds, err := credentials.NewClientTLSFromFile(l.cfg.TLSCertPath, "")
+	if err != nil {
+		return nil, err
+	}
+	macBytes, err := ioutil.ReadFile(l.cfg.AdminMacPath)
+	if err != nil {
+		return nil, err
+	}
+	mac := &macaroon.Macaroon{}
+	if err = mac.UnmarshalBinary(macBytes); err != nil {
+		return nil, err
+	}
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(tlsCreds),
+		grpc.WithPerRPCCredentials(macaroons.NewMacaroonCredential(mac)),
+		grpc.WithBlock(),
+		grpc.WithTimeout(time.Second * 20),
+	}
+	return grpc.Dial(l.rpcAddr, opts...)
+}
+
 // cleanup cleans up all the temporary files created by the node's process.
 func (l *lightningNode) cleanup() error {
 	dirs := []string{
@@ -326,8 +353,9 @@ func (l *lightningNode) cleanup() error {
 
 	var err error
 	for _, dir := range dirs {
-		if err = os.RemoveAll(dir); err != nil {
-			log.Printf("Cannot remove dir %s: %v", dir, err)
+		if removeErr := os.RemoveAll(dir); removeErr != nil {
+			log.Printf("Cannot remove dir %s: %v", dir, removeErr)
+			err = removeErr
 		}
 	}
 	return err
@@ -335,10 +363,12 @@ func (l *lightningNode) cleanup() error {
 
 // Stop attempts to stop the active lnd process.
 func (l *lightningNode) Stop() error {
-	// We should skip node stop in case:
-	// - start of the node wasn't initiated
-	// - process wasn't spawned
-	// - process already finished
+	// Do nothing if the process never started successfully.
+	if l.LightningClient == nil {
+		return nil
+	}
+
+	// Do nothing if the process already finished.
 	select {
 	case <-l.quit:
 		return nil
@@ -366,11 +396,12 @@ func (l *lightningNode) Stop() error {
 // process has been started up again.
 func (l *lightningNode) Restart(errChan chan error, callback func() error) error {
 	if err := l.Stop(); err != nil {
-		return nil
+		return err
 	}
 
 	<-l.processExit
 
+	l.LightningClient = nil
 	l.processExit = make(chan struct{})
 	l.quit = make(chan struct{})
 	l.wg = sync.WaitGroup{}
@@ -682,6 +713,8 @@ type networkHarness struct {
 	// to main process.
 	lndErrorChan chan error
 
+	quit chan struct{}
+
 	sync.Mutex
 }
 
@@ -695,10 +728,11 @@ func newNetworkHarness() (*networkHarness, error) {
 		seenTxns:             make(chan chainhash.Hash),
 		bitcoinWatchRequests: make(chan *txWatchRequest),
 		lndErrorChan:         make(chan error),
+		quit:                 make(chan struct{}),
 	}, nil
 }
 
-// InitializeSeedNodes initialized alice and bob nodes given an already
+// InitializeSeedNodes initializes alice and bob nodes given an already
 // running instance of btcd's rpctest harness and extra command line flags,
 // which should be formatted properly - "--arg=value".
 func (n *networkHarness) InitializeSeedNodes(r *rpctest.Harness, lndArgs []string) error {
@@ -727,7 +761,7 @@ func (n *networkHarness) InitializeSeedNodes(r *rpctest.Harness, lndArgs []strin
 // ProcessErrors returns a channel used for reporting any fatal process errors.
 // If any of the active nodes within the harness' test network incur a fatal
 // error, that error is sent over this channel.
-func (n *networkHarness) ProcessErrors() chan error {
+func (n *networkHarness) ProcessErrors() <-chan error {
 	return n.lndErrorChan
 }
 
@@ -750,25 +784,22 @@ func (n *networkHarness) SetUp() error {
 	// Swap out grpc's default logger with out fake logger which drops the
 	// statements on the floor.
 	grpclog.SetLogger(&fakeLogger{})
+
 	// Start the initial seeder nodes within the test network, then connect
 	// their respective RPC clients.
 	var wg sync.WaitGroup
 	errChan := make(chan error, 2)
 	wg.Add(2)
 	go func() {
-		var err error
 		defer wg.Done()
-		if err = n.Alice.Start(n.lndErrorChan); err != nil {
+		if err := n.Alice.Start(n.lndErrorChan); err != nil {
 			errChan <- err
-			return
 		}
 	}()
 	go func() {
-		var err error
 		defer wg.Done()
-		if err = n.Bob.Start(n.lndErrorChan); err != nil {
+		if err := n.Bob.Start(n.lndErrorChan); err != nil {
 			errChan <- err
-			return
 		}
 	}()
 	wg.Wait()
@@ -839,8 +870,8 @@ out:
 				return err
 			}
 
-			if aliceResp.Balance == expectedBalance &&
-				bobResp.Balance == expectedBalance {
+			if aliceResp.ConfirmedBalance == expectedBalance &&
+				bobResp.ConfirmedBalance == expectedBalance {
 				break out
 			}
 		case <-balanceTimeout:
@@ -863,6 +894,9 @@ func (n *networkHarness) TearDownAll() error {
 		}
 	}
 
+	close(n.lndErrorChan)
+	close(n.quit)
+
 	return nil
 }
 
@@ -878,11 +912,13 @@ func (n *networkHarness) NewNode(extraArgs []string) (*lightningNode, error) {
 		return nil, err
 	}
 
+	// Put node in activeNodes to ensure Shutdown is called even if Start
+	// returns an error.
+	n.activeNodes[node.nodeID] = node
+
 	if err := node.Start(n.lndErrorChan); err != nil {
 		return nil, err
 	}
-
-	n.activeNodes[node.nodeID] = node
 
 	return node, nil
 }
@@ -989,6 +1025,9 @@ func (n *networkHarness) networkWatcher() {
 	for {
 
 		select {
+		case <-n.quit:
+			return
+
 		case req := <-n.bitcoinWatchRequests:
 			// If we've already seen this transaction, then
 			// immediately dispatch the request. Otherwise, append
@@ -1026,6 +1065,13 @@ func (n *networkHarness) networkWatcher() {
 // OnTxAccepted is a callback to be called each time a new transaction has been
 // broadcast on the network.
 func (n *networkHarness) OnTxAccepted(hash *chainhash.Hash, amt btcutil.Amount) {
+	// Return immediately if harness has been torn down.
+	select {
+	case <-n.quit:
+		return
+	default:
+	}
+
 	go func() {
 		n.seenTxns <- *hash
 	}()
@@ -1036,6 +1082,13 @@ func (n *networkHarness) OnTxAccepted(hash *chainhash.Hash, amt btcutil.Amount) 
 // then an error is returned.
 // TODO(roasbeef): add another method which creates queue of all seen transactions
 func (n *networkHarness) WaitForTxBroadcast(ctx context.Context, txid chainhash.Hash) error {
+	// Return immediately if harness has been torn down.
+	select {
+	case <-n.quit:
+		return fmt.Errorf("networkHarness has been torn down")
+	default:
+	}
+
 	eventChan := make(chan struct{})
 
 	n.bitcoinWatchRequests <- &txWatchRequest{
@@ -1046,6 +1099,8 @@ func (n *networkHarness) WaitForTxBroadcast(ctx context.Context, txid chainhash.
 	select {
 	case <-eventChan:
 		return nil
+	case <-n.quit:
+		return fmt.Errorf("networkHarness has been torn down")
 	case <-ctx.Done():
 		return fmt.Errorf("tx not seen before context timeout")
 	}
@@ -1216,6 +1271,45 @@ func (n *networkHarness) WaitForChannelOpen(ctx context.Context,
 func (n *networkHarness) CloseChannel(ctx context.Context,
 	lnNode *lightningNode, cp *lnrpc.ChannelPoint,
 	force bool) (lnrpc.Lightning_CloseChannelClient, *chainhash.Hash, error) {
+
+	// Create a channel outpoint that we can use to compare to channels
+	// from the ListChannelsResponse.
+	fundingTxID, err := chainhash.NewHash(cp.FundingTxid)
+	if err != nil {
+		return nil, nil, err
+	}
+	chanPoint := wire.OutPoint{
+		Hash:  *fundingTxID,
+		Index: cp.OutputIndex,
+	}
+
+	// If we are not force closing the channel, wait for channel to become
+	// active before attempting to close it.
+	numTries := 10
+CheckActive:
+	for i := 0; !force && i < numTries; i++ {
+		listReq := &lnrpc.ListChannelsRequest{}
+		listResp, err := lnNode.ListChannels(ctx, listReq)
+		if err != nil {
+			return nil, nil, fmt.Errorf("unable fetch node's "+
+				"channels: %v", err)
+		}
+
+		for _, c := range listResp.Channels {
+			if c.ChannelPoint == chanPoint.String() && c.Active {
+				break CheckActive
+			}
+		}
+
+		if i == numTries-1 {
+			// Last iteration, and channel is still not active.
+			return nil, nil, fmt.Errorf("channel did not become " +
+				"active")
+		}
+
+		// Sleep, and try again.
+		time.Sleep(300 * time.Millisecond)
+	}
 
 	closeReq := &lnrpc.CloseChannelRequest{
 		ChannelPoint: cp,
@@ -1402,7 +1496,7 @@ func (n *networkHarness) SendCoins(ctx context.Context, amt btcutil.Amount,
 				return err
 			}
 
-			if currentBal.Balance == initialBalance.Balance+int64(amt) {
+			if currentBal.ConfirmedBalance == initialBalance.ConfirmedBalance+int64(amt) {
 				return nil
 			}
 		case <-balanceTimeout:

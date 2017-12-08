@@ -61,7 +61,7 @@ var _ lnwallet.WalletController = (*BtcWallet)(nil)
 // configuration struct.
 func New(cfg Config) (*BtcWallet, error) {
 	// Ensure the wallet exists or create it when the create flag is set.
-	netDir := networkDir(cfg.DataDir, cfg.NetParams)
+	netDir := NetworkDir(cfg.DataDir, cfg.NetParams)
 
 	var pubPass []byte
 	if cfg.PublicPass == nil {
@@ -85,8 +85,9 @@ func New(cfg Config) (*BtcWallet, error) {
 			return nil, err
 		}
 	} else {
-		// Wallet has been created and been initialized at this point, open it
-		// along with all the required DB namepsaces, and the DB itself.
+		// Wallet has been created and been initialized at this point,
+		// open it along with all the required DB namepsaces, and the
+		// DB itself.
 		wallet, err = loader.OpenExistingWallet(pubPass, false)
 		if err != nil {
 			return nil, err
@@ -107,14 +108,6 @@ func New(cfg Config) (*BtcWallet, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	// Using the passed fee estimator, we'll compute the relay fee for all
-	// transactions made which will be scaled up according to the size of a
-	// particular transaction.
-	//
-	// TODO(roasbeef): hook in dynamic relay fees
-	relayFee := cfg.FeeEstimator.EstimateFeePerByte(3) * 1000
-	wallet.SetRelayFee(btcutil.Amount(relayFee))
 
 	return &BtcWallet{
 		cfg:       &cfg,
@@ -196,7 +189,7 @@ func (b *BtcWallet) ConfirmedBalance(confs int32, witness bool) (btcutil.Amount,
 }
 
 // NewAddress returns the next external or internal address for the wallet
-// dicatated by the value of the `change` paramter. If change is true, then an
+// dictated by the value of the `change` parameter. If change is true, then an
 // internal address will be returned, otherwise an external address should be
 // returned.
 //
@@ -310,8 +303,14 @@ func (b *BtcWallet) FetchRootKey() (*btcec.PrivateKey, error) {
 // outputs are non-standard, a non-nil error will be be returned.
 //
 // This is a part of the WalletController interface.
-func (b *BtcWallet) SendOutputs(outputs []*wire.TxOut) (*chainhash.Hash, error) {
-	return b.wallet.SendOutputs(outputs, defaultAccount, 1)
+func (b *BtcWallet) SendOutputs(outputs []*wire.TxOut,
+	feeSatPerByte btcutil.Amount) (*chainhash.Hash, error) {
+
+	// The fee rate is passed in using units of sat/byte, so we'll scale
+	// this up to sat/KB as the SendOutputs method requires this unit.
+	feeSatPerKB := feeSatPerByte * 1024
+
+	return b.wallet.SendOutputs(outputs, defaultAccount, 1, feeSatPerKB)
 }
 
 // LockOutpoint marks an outpoint as locked meaning it will no longer be deemed
@@ -353,17 +352,28 @@ func (b *BtcWallet) ListUnspentWitness(minConfs int32) ([]*lnwallet.Utxo, error)
 			return nil, err
 		}
 
-		// TODO(roasbeef): this assumes all p2sh outputs returned by
-		// the wallet are nested p2sh...
-		if txscript.IsPayToWitnessPubKeyHash(pkScript) ||
-			txscript.IsPayToScriptHash(pkScript) {
+		var addressType lnwallet.AddressType
+		if txscript.IsPayToWitnessPubKeyHash(pkScript) {
+			addressType = lnwallet.WitnessPubKey
+		} else if txscript.IsPayToScriptHash(pkScript) {
+			// TODO(roasbeef): This assumes all p2sh outputs returned by the
+			// wallet are nested p2pkh. We can't check the redeem script because
+			// the btcwallet service does not include it.
+			addressType = lnwallet.NestedWitnessPubKey
+		}
+
+		if addressType == lnwallet.WitnessPubKey ||
+			addressType == lnwallet.NestedWitnessPubKey {
+
 			txid, err := chainhash.NewHashFromStr(output.TxID)
 			if err != nil {
 				return nil, err
 			}
 
 			utxo := &lnwallet.Utxo{
-				Value: btcutil.Amount(output.Amount * 1e8),
+				AddressType: addressType,
+				Value:       btcutil.Amount(output.Amount * 1e8),
+				PkScript:    pkScript,
 				OutPoint: wire.OutPoint{
 					Hash:  *txid,
 					Index: output.Vout,

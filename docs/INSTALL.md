@@ -7,7 +7,7 @@
   * **Go:** `lnd` is written in Go. To install, run one of the following commands:
 
   
-    **Note**: The minimum version of Go supported is Go 1.7.
+    **Note**: The minimum version of Go supported is Go 1.8.
 
     
     On Linux:
@@ -27,7 +27,7 @@
 
     At this point, you should set your `$GOPATH` environment variable, which
     represents the path to your workspace. By default, `$GOPATH` is set to
-    `~/go`. You wll also need to add `$GOPATH/bin` to your `PATH`. This ensures
+    `~/go`. You will also need to add `$GOPATH/bin` to your `PATH`. This ensures
     that your shell will be able to detect the binaries you install.
 
     ```bash
@@ -169,9 +169,9 @@ lnd --bitcoin.active --bitcoin.testnet --debuglevel=debug --neutrino.active --ne
 #### Running lnd using the btcd backend
 
 If you are on testnet, run this command after `btcd` has finished syncing.
-Otherwise, replace `--bitcoin.testnet` with `--bitcoin.simnet`. If you
+Otherwise, replace `--bitcoin.testnet` with `--bitcoin.simnet`. If you are
 installing `lnd` in preparation for the
-[tutorial](//dev.lightning.community/tutorial), you may skip this step.
+[tutorial](http://dev.lightning.community/tutorial), you may skip this step.
 ```
 lnd --bitcoin.active --bitcoin.testnet --debuglevel=debug --bitcoin.rpcuser=kek --bitcoin.rpcpass=kek --externalip=X.X.X.X
 ```

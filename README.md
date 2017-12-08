@@ -6,6 +6,8 @@
 [![Godoc](https://godoc.org/github.com/lightningnetwork/lnd?status.svg)](https://godoc.org/github.com/lightningnetwork/lnd)
 [![Coverage Status](https://coveralls.io/repos/github/lightningnetwork/lnd/badge.svg?branch=master)](https://coveralls.io/github/lightningnetwork/lnd?branch=master)
 
+<img src="logo.png">
+
 The Lightning Network Daemon (`lnd`) - is a complete implementation of a
 [Lightning Network](https://lightning.network) node and currently deployed on
 `testnet3` - the Bitcoin Test Network.  `lnd` has several pluggable back-end
@@ -35,14 +37,15 @@ implementation of the specification are still a work-in-progress. With that
 said, `lnd` the current status of `lnd`'s BOLT compliance is:
 
   - [X] BOLT 1: Base Protocol
-  - [ ] BOLT 2: Peer Protocol for Channel Management
-     * `lnd` has not yet integrated full channel re-transmission upon
-       reconnection
+  - [X] BOLT 2: Peer Protocol for Channel Management
   - [X] BOLT 3: Bitcoin Transaction and Script Formats
   - [X] BOLT 4: Onion Routing Protocol
   - [X] BOLT 5: Recommendations for On-chain Transaction Handling
   - [X] BOLT 7: P2P Node and Channel Discovery
   - [X] BOLT 8: Encrypted and Authenticated Transport
+  - [X] BOLT 9: Assigned Feature Flags
+  - [X] BOLT 10: DNS Bootstrap and Assisted Node Location
+  - [X] BOLT 11: Invoice Protocol for Lightning Payments
 
 ## Developer Resources
 

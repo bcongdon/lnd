@@ -35,10 +35,7 @@ type htlcPacket struct {
 
 	// obfuscator contains the necessary state to allow the switch to wrap
 	// any forwarded errors in an additional layer of encryption.
-	//
-	// TODO(andrew.shvv) revisit after refactoring the way of returning
-	// errors inside the htlcswitch packet.
-	obfuscator Obfuscator
+	obfuscator ErrorEncrypter
 
 	// isObfuscated is set to true if an error occurs as soon as the switch
 	// forwards a packet to the link. If so, and this is an error packet,
@@ -54,6 +51,7 @@ type htlcPacket struct {
 func newInitPacket(destNode [33]byte, htlc *lnwire.UpdateAddHTLC) *htlcPacket {
 	return &htlcPacket{
 		destNode: destNode,
+		amount:   htlc.Amount,
 		htlc:     htlc,
 	}
 }
@@ -61,13 +59,14 @@ func newInitPacket(destNode [33]byte, htlc *lnwire.UpdateAddHTLC) *htlcPacket {
 // newAddPacket creates htlc switch add packet which encapsulates the add htlc
 // request and additional information for proper forwarding over htlc switch.
 func newAddPacket(src, dest lnwire.ShortChannelID,
-	htlc *lnwire.UpdateAddHTLC, obfuscator Obfuscator) *htlcPacket {
+	htlc *lnwire.UpdateAddHTLC, e ErrorEncrypter) *htlcPacket {
 
 	return &htlcPacket{
+		amount:     htlc.Amount,
 		dest:       dest,
 		src:        src,
 		htlc:       htlc,
-		obfuscator: obfuscator,
+		obfuscator: e,
 	}
 }
 

@@ -65,13 +65,8 @@ type NeutrinoNotifier struct {
 
 	rescanErr <-chan error
 
-	newBlocksMtx          sync.Mutex
-	newBlocks             []*filteredBlock
-	newBlocksUpdateSignal chan struct{}
-
-	staleBlocksMtx          sync.Mutex
-	staleBlocks             []*filteredBlock
-	staleBlocksUpdateSignal chan struct{}
+	newBlocks   *chainntnfs.ConcurrentQueue
+	staleBlocks *chainntnfs.ConcurrentQueue
 
 	wg   sync.WaitGroup
 	quit chan struct{}
@@ -101,9 +96,9 @@ func New(node *neutrino.ChainService) (*NeutrinoNotifier, error) {
 
 		rescanErr: make(chan error),
 
-		newBlocksUpdateSignal: make(chan struct{}),
+		newBlocks: chainntnfs.NewConcurrentQueue(10),
 
-		staleBlocksUpdateSignal: make(chan struct{}),
+		staleBlocks: chainntnfs.NewConcurrentQueue(10),
 
 		quit: make(chan struct{}),
 	}
@@ -155,6 +150,9 @@ func (n *NeutrinoNotifier) Start() error {
 	n.chainView = n.p2pNode.NewRescan(rescanOptions...)
 	n.rescanErr = n.chainView.Start()
 
+	n.newBlocks.Start()
+	n.staleBlocks.Start()
+
 	n.wg.Add(1)
 	go n.notificationDispatcher()
 
@@ -170,6 +168,9 @@ func (n *NeutrinoNotifier) Stop() error {
 
 	close(n.quit)
 	n.wg.Wait()
+
+	n.newBlocks.Stop()
+	n.staleBlocks.Stop()
 
 	// Notify all pending clients of our shutdown by closing the related
 	// notification channels.
@@ -208,20 +209,11 @@ func (n *NeutrinoNotifier) onFilteredBlockConnected(height int32,
 
 	// Append this new chain update to the end of the queue of new chain
 	// updates.
-	n.newBlocksMtx.Lock()
-	n.newBlocks = append(n.newBlocks, &filteredBlock{
+	n.newBlocks.ChanIn() <- &filteredBlock{
 		hash:   header.BlockHash(),
 		height: uint32(height),
 		txns:   txns,
-	})
-	n.newBlocksMtx.Unlock()
-
-	// Launch a goroutine to signal the notification dispatcher that a new
-	// transaction update is available. We do this in a new goroutine in
-	// order to avoid blocking the main loop of the rescan.
-	go func() {
-		n.newBlocksUpdateSignal <- struct{}{}
-	}()
+	}
 }
 
 // onFilteredBlockDisconnected is a callback which is executed each time a new
@@ -231,19 +223,10 @@ func (n *NeutrinoNotifier) onFilteredBlockDisconnected(height int32,
 
 	// Append this new chain update to the end of the queue of new chain
 	// disconnects.
-	n.staleBlocksMtx.Lock()
-	n.staleBlocks = append(n.staleBlocks, &filteredBlock{
+	n.staleBlocks.ChanIn() <- &filteredBlock{
 		hash:   header.BlockHash(),
 		height: uint32(height),
-	})
-	n.staleBlocksMtx.Unlock()
-
-	// Launch a goroutine to signal the notification dispatcher that a new
-	// transaction update is available. We do this in a new goroutine in
-	// order to avoid blocking the main loop of the rescan.
-	go func() {
-		n.staleBlocksUpdateSignal <- struct{}{}
-	}()
+	}
 }
 
 // notificationDispatcher is the primary goroutine which handles client
@@ -335,14 +318,8 @@ func (n *NeutrinoNotifier) notificationDispatcher() {
 				n.blockEpochClients[msg.epochID] = msg
 			}
 
-		case <-n.newBlocksUpdateSignal:
-			// A new update is available, so pop the new chain
-			// update from the front of the update queue.
-			n.newBlocksMtx.Lock()
-			newBlock := n.newBlocks[0]
-			n.newBlocks[0] = nil // Set to nil to prevent GC leak.
-			n.newBlocks = n.newBlocks[1:]
-			n.newBlocksMtx.Unlock()
+		case item := <-n.newBlocks.ChanOut():
+			newBlock := item.(*filteredBlock)
 
 			n.heightMtx.Lock()
 			n.bestHeight = newBlock.height
@@ -417,15 +394,8 @@ func (n *NeutrinoNotifier) notificationDispatcher() {
 			// have been triggered by this new block.
 			n.notifyConfs(int32(newBlock.height))
 
-		case <-n.staleBlocksUpdateSignal:
-			// A new update is available, so pop the new chain
-			// update from the front of the update queue.
-			n.staleBlocksMtx.Lock()
-			staleBlock := n.staleBlocks[0]
-			n.staleBlocks[0] = nil // Set to nil to prevent GC leak.
-			n.staleBlocks = n.staleBlocks[1:]
-			n.staleBlocksMtx.Unlock()
-
+		case item := <-n.staleBlocks.ChanOut():
+			staleBlock := item.(*filteredBlock)
 			chainntnfs.Log.Warnf("Block disconnected from main "+
 				"chain: %v", staleBlock.hash)
 
@@ -449,10 +419,7 @@ func (n *NeutrinoNotifier) attemptHistoricalDispatch(msg *confirmationsNotificat
 
 	targetHash := msg.txid
 
-	var (
-		confDetails *chainntnfs.TxConfirmation
-		scanHeight  uint32
-	)
+	var confDetails *chainntnfs.TxConfirmation
 
 	chainntnfs.Log.Infof("Attempting to trigger dispatch for %v from "+
 		"historical chain", msg.txid)
@@ -471,11 +438,12 @@ chainScan:
 		}
 		blockHash := header.BlockHash()
 
-		// With the hash computed, we can now fetch the extended filter
+		// With the hash computed, we can now fetch the basic filter
 		// for this height.
-		extFilter, err := n.p2pNode.GetCFilter(blockHash, true)
+		regFilter, err := n.p2pNode.GetCFilter(blockHash,
+			wire.GCSFilterRegular)
 		if err != nil {
-			chainntnfs.Log.Errorf("unable to retrieve extended "+
+			chainntnfs.Log.Errorf("unable to retrieve regular "+
 				"filter for height=%v: %v", scanHeight, err)
 			return false
 		}
@@ -483,14 +451,14 @@ chainScan:
 		// If the block has no transactions other than the coinbase
 		// transaction, then the filter may be nil, so we'll continue
 		// forward int that case.
-		if extFilter == nil {
+		if regFilter == nil {
 			continue
 		}
 
 		// In the case that the filter exists, we'll attempt to see if
 		// any element in it match our target txid.
 		key := builder.DeriveKey(&blockHash)
-		match, err := extFilter.Match(key, targetHash[:])
+		match, err := regFilter.Match(key, targetHash[:])
 		if err != nil {
 			chainntnfs.Log.Errorf("unable to query filter: %v", err)
 			return false
@@ -532,20 +500,21 @@ chainScan:
 	// Otherwise, we'll calculate the number of confirmations that the
 	// transaction has so we can decide if it has reached the desired
 	// number of confirmations or not.
-	txConfs := currentHeight - scanHeight
+	txConfs := currentHeight - confDetails.BlockHeight + 1
 
 	// If the transaction has more that enough confirmations, then we can
 	// dispatch it immediately after obtaining for information w.r.t
 	// exactly *when* if got all its confirmations.
 	if uint32(txConfs) >= msg.numConfirmations {
+		chainntnfs.Log.Infof("Dispatching %v conf notification, "+
+			"height=%v", msg.numConfirmations, currentHeight)
 		msg.finConf <- confDetails
 		return true
 	}
 
 	// Otherwise, the transaction has only been *partially* confirmed, so
 	// we need to insert it into the confirmation heap.
-	confsLeft := msg.numConfirmations - uint32(txConfs)
-	confHeight := uint32(currentHeight) + confsLeft
+	confHeight := confDetails.BlockHeight + msg.numConfirmations - 1
 	heapEntry := &confEntry{
 		msg,
 		confDetails,
@@ -553,7 +522,7 @@ chainScan:
 	}
 	heap.Push(n.confHeap, heapEntry)
 
-	return false
+	return true
 }
 
 // notifyBlockEpochs notifies all registered block epoch clients of the newly
@@ -602,6 +571,9 @@ func (n *NeutrinoNotifier) notifyConfs(newBlockHeight int32) {
 	// if another is eligible until there are no more eligible entries.
 	nextConf := heap.Pop(n.confHeap).(*confEntry)
 	for nextConf.triggerHeight <= uint32(newBlockHeight) {
+
+		chainntnfs.Log.Infof("Dispatching %v conf notification, "+
+			"height=%v", nextConf.numConfirmations, newBlockHeight)
 
 		nextConf.finConf <- nextConf.initialConfDetails
 
